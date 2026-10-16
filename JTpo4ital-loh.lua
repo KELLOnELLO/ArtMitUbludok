@@ -1,12 +1,3 @@
--- СРОЧНО!!! откатил версию назад, пишите в инжекторе loadstring(game:HttpGet("https://pastebin.com/raw/FDvHzgaG"))()
--- СРОЧНО!!! откатил версию назад, пишите в инжекторе loadstring(game:HttpGet("https://pastebin.com/raw/FDvHzgaG"))()
--- СРОЧНО!!! откатил версию назад, пишите в инжекторе loadstring(game:HttpGet("https://pastebin.com/raw/FDvHzgaG"))()
--- СРОЧНО!!! откатил версию назад, пишите в инжекторе loadstring(game:HttpGet("https://pastebin.com/raw/FDvHzgaG"))()
--- СРОЧНО!!! откатил версию назад, пишите в инжекторе loadstring(game:HttpGet("https://pastebin.com/raw/FDvHzgaG"))()
--- СРОЧНО!!! откатил версию назад, пишите в инжекторе loadstring(game:HttpGet("https://pastebin.com/raw/FDvHzgaG"))()
--- СРОЧНО!!! откатил версию назад, пишите в инжекторе loadstring(game:HttpGet("https://pastebin.com/raw/FDvHzgaG"))()
--- если что откатил версию на лучшую, на самую крутую и рабочую, спс что покупаете на фанпее!!!
-
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
