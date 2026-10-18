@@ -1,3 +1,4 @@
+-- Fixed autosell
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
@@ -313,8 +314,8 @@ local threeDOverlay = nil
 local overlayLabels = nil
 
 local sellingNow = false
-local sellSpamThread = nil
-local autoSellManualThread = nil
+local autoSellLoopThread = nil
+local currentClickCount = 0
 
 local infoEnabled = false
 local infoConnection = nil
@@ -936,6 +937,157 @@ end
 
 skipLoading()
 
+local function ForceClick(optionName)
+    local DialogueGui = LocalPlayer.PlayerGui:FindFirstChild("DialogueGui")
+    if not DialogueGui then return end
+    
+    local Frame = DialogueGui:FindFirstChild("Frame")
+    if not Frame then return end
+    
+    local Options = Frame:FindFirstChild("Options")
+    if not Options then return end
+    
+    local Option = Options:FindFirstChild(optionName)
+    if not Option then return end
+    
+    local TextButton = Option:FindFirstChild("TextButton")
+    if not TextButton or not TextButton.Visible then return end
+    
+    for _, connection in pairs(getconnections(TextButton.MouseButton1Click)) do
+        if connection.Function then
+            pcall(function()
+                connection.Function()
+            end)
+        else
+            pcall(function()
+                connection:Fire()
+            end)
+        end
+    end
+    
+    pcall(function()
+        TextButton:Activated()
+    end)
+end
+
+local function normalizeText(text)
+    text = tostring(text or ""):lower()
+    text = text:gsub("[%c%p]", " ")
+    text = text:gsub("%s+", " ")
+    return text:match("^%s*(.-)%s*$") or ""
+end
+
+local function findMerchantPrompt()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("ProximityPrompt") then
+            local parent = obj.Parent
+            local matched = false
+            local depth = 0
+            while parent and parent ~= workspace and depth < 6 do
+                if tostring(parent.Name):lower():find("merchant", 1, true) then
+                    matched = true
+                    break
+                end
+                parent = parent.Parent
+                depth = depth + 1
+            end
+            local otext = normalizeText(obj.ObjectText)
+            local atext = normalizeText(obj.ActionText)
+            if matched or otext:find("merchant", 1, true) or atext:find("merchant", 1, true) then
+                return obj
+            end
+        end
+    end
+    return nil
+end
+
+local function equipSellTool(itemName)
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local hum = char:FindFirstChildWhichIsA("Humanoid")
+    if not hum then return nil end
+    
+    local tool = LocalPlayer.Backpack:FindFirstChild(itemName)
+    if not tool then
+        tool = char:FindFirstChild(itemName)
+    end
+    if not tool then return nil end
+    
+    if tool.Parent == LocalPlayer.Backpack then
+        local ok = pcall(function() hum:EquipTool(tool) end)
+        if not ok then return nil end
+        task.wait(0.15)
+    end
+    
+    local deadline = tick() + 1
+    while tool.Parent ~= char and tick() < deadline do task.wait() end
+    return tool
+end
+
+local function startAutoSell()
+    if autoSellLoopThread then return end
+    autoSellLoopThread = task.spawn(function()
+        while Config.AutoSell do
+            task.wait(0.1)
+            
+            local DialogueGui = LocalPlayer.PlayerGui:FindFirstChild("DialogueGui")
+            
+            if not DialogueGui then
+                local char = LocalPlayer.Character
+                if char and char:FindFirstChild("HumanoidRootPart") then
+                    local equipped = false
+                    for _, itemName in ipairs(SELL_ITEMS_DEFAULT) do
+                        if SellItems[itemName] and countItem(itemName) > 0 then
+                            equipSellTool(itemName)
+                            equipped = true
+                            break
+                        end
+                    end
+                    
+                    if equipped then
+                        local prompt = findMerchantPrompt()
+                        if prompt then
+                            pcall(function()
+                                fireproximityprompt(prompt)
+                            end)
+                        end
+                        task.wait(0.5)
+                    end
+                end
+            else
+                local targetOption = "Option1"
+                if currentClickCount >= 2 then
+                    targetOption = "Option5"
+                end
+                
+                local Options = DialogueGui.Frame and DialogueGui.Frame:FindFirstChild("Options")
+                if Options and Options:FindFirstChild(targetOption) then
+                    ForceClick(targetOption)
+                    
+                    if targetOption == "Option1" then
+                        currentClickCount = currentClickCount + 1
+                    elseif targetOption == "Option5" then
+                        currentClickCount = 0
+                    end
+                    
+                    task.wait(0.3)
+                end
+            end
+        end
+    end)
+end
+
+local function stopAutoSell()
+    if autoSellLoopThread then
+        pcall(function() task.cancel(autoSellLoopThread) end)
+        autoSellLoopThread = nil
+    end
+    currentClickCount = 0
+end
+
 local function autoStealLoop()
     while true do
         task.wait(0.05)
@@ -988,323 +1140,6 @@ local kickConn = CoreGui.DescendantAdded:Connect(function(child)
     end
 end)
 table.insert(_G.VoidYBAFarm.connections, kickConn)
-
-local function normalizeText(text)
-    text = tostring(text or ""):lower()
-    text = text:gsub("[%c%p]", " ")
-    text = text:gsub("%s+", " ")
-    return text:match("^%s*(.-)%s*$") or ""
-end
-
-local function getButtonText(btn)
-    if not btn then return "" end
-    if btn:IsA("TextButton") and btn.Text ~= "" then return btn.Text end
-    for _, child in ipairs(btn:GetDescendants()) do
-        if child:IsA("TextLabel") and child.Text ~= "" then return child.Text end
-    end
-    return ""
-end
-
-local function isActuallyVisible(obj)
-    if not obj or not obj.Parent then return false end
-    if obj:IsA("GuiObject") and obj.Visible == false then return false end
-    local parent = obj.Parent
-    while parent and parent ~= LocalPlayer.PlayerGui do
-        if parent:IsA("GuiObject") and parent.Visible == false then return false end
-        parent = parent.Parent
-    end
-    return true
-end
-
-local function getDialogueGui()
-    local direct = LocalPlayer.PlayerGui:FindFirstChild("DialogueGui")
-    if direct then return direct end
-    for _, obj in ipairs(LocalPlayer.PlayerGui:GetChildren()) do
-        if tostring(obj.Name):lower():find("dialog", 1, true) then
-            return obj
-        end
-    end
-    return nil
-end
-
-local function getVisibleDialogueButtons()
-    local dlg = getDialogueGui()
-    if not dlg then return {} end
-    local buttons = {}
-    for _, obj in ipairs(dlg:GetDescendants()) do
-        if obj:IsA("GuiButton") and isActuallyVisible(obj) then
-            local text = getButtonText(obj)
-            if normalizeText(text) ~= "" then
-                table.insert(buttons, {
-                    Button = obj,
-                    Text = text,
-                    Normalized = normalizeText(text),
-                })
-            end
-        end
-    end
-    return buttons
-end
-
-local function clickButton(btn)
-    if not btn or not btn.Parent then return false end
-    return pcall(function()
-        local absPos = btn.AbsolutePosition
-        local absSize = btn.AbsoluteSize
-        local x = absPos.X + absSize.X / 2
-        local y = absPos.Y + absSize.Y / 2
-        VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 1)
-        task.wait(0.05)
-        VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 1)
-    end)
-end
-
-local NEGATIVE_WORDS = {
-    "buy", "leave", "cancel", "nevermind", "never mind",
-    "no thanks", "no thank", "goodbye", "exit", "nothing",
-}
-
-local function containsAny(text, words)
-    for _, word in ipairs(words) do
-        if text:find(word, 1, true) then return true end
-    end
-    return false
-end
-
-local function scoreSellOption(entry)
-    local text = entry.Normalized
-    if text == "" then return -math.huge end
-    if containsAny(text, NEGATIVE_WORDS) then return -1000 end
-
-    local score = 0
-    local hasSell = text:find("sell", 1, true) ~= nil
-    local hasAll = text:find("all", 1, true) ~= nil
-    local hasEverything = text:find("everything", 1, true) ~= nil
-    local hasMax = text:find("max", 1, true) ~= nil
-
-    if hasSell and (hasAll or hasEverything or hasMax) then score = score + 220 end
-    if hasAll or hasEverything or hasMax then score = score + 150 end
-    if hasSell then score = score + 100 end
-    if text:find("this", 1, true) and hasSell then score = score + 30 end
-    if text:find("item", 1, true) and hasSell then score = score + 20 end
-    if text:find("deal", 1, true) then score = score + 90 end
-    if text:find("confirm", 1, true) then score = score + 80 end
-    if text == "yes" or text:find("yes ", 1, true) == 1 then score = score + 70 end
-    if text == "ok" or text == "okay" or text:find("sure", 1, true) then score = score + 55 end
-
-    local quantity = tonumber(text:match("(%d+)%s*x")) or tonumber(text:match("sell%s+(%d+)"))
-    if quantity then score = score + math.min(quantity, 50) end
-
-    return score
-end
-
-local function waitForDialogueButtons(timeout)
-    timeout = timeout or 3
-    local started = tick()
-    while tick() - started < timeout do
-        local buttons = getVisibleDialogueButtons()
-        if #buttons > 0 then return buttons end
-        task.wait(0.1)
-    end
-    return {}
-end
-
-local function chooseBestSellButton(buttons)
-    local best, bestScore = nil, -math.huge
-    for _, entry in ipairs(buttons) do
-        local s = scoreSellOption(entry)
-        if s > bestScore then
-            bestScore = s
-            best = entry
-        end
-    end
-    if bestScore <= 0 then return nil end
-    return best
-end
-
-local function findMerchantPrompt()
-    local dlgFolder = ReplicatedStorage:FindFirstChild("Dialogue")
-    if dlgFolder then
-        local merchant = dlgFolder:FindFirstChild("Merchant", true)
-        if merchant then
-            local prompt = merchant:FindFirstChildWhichIsA("ProximityPrompt", true)
-            if prompt then return prompt end
-        end
-    end
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("ProximityPrompt") then
-            local parent = obj.Parent
-            local matched = false
-            local depth = 0
-            while parent and parent ~= workspace and depth < 6 do
-                if tostring(parent.Name):lower():find("merchant", 1, true) then
-                    matched = true
-                    break
-                end
-                parent = parent.Parent
-                depth = depth + 1
-            end
-            local otext = normalizeText(obj.ObjectText)
-            local atext = normalizeText(obj.ActionText)
-            if matched or otext:find("merchant", 1, true) or atext:find("merchant", 1, true) then
-                return obj
-            end
-        end
-    end
-    return nil
-end
-
-local function closeDialogueIfOpen()
-    local dlg = getDialogueGui()
-    if not dlg then return end
-    local buttons = getVisibleDialogueButtons()
-    for _, entry in ipairs(buttons) do
-        local t = entry.Normalized
-        if t:find("leave", 1, true) or t:find("cancel", 1, true)
-            or t:find("nevermind", 1, true) or t:find("never mind", 1, true)
-            or t:find("goodbye", 1, true) or t:find("exit", 1, true) then
-            clickButton(entry.Button)
-            task.wait(0.2)
-            return
-        end
-    end
-end
-
-local function equipTool(itemName)
-    local char = LocalPlayer.Character
-    local hum = char and char:FindFirstChildWhichIsA("Humanoid")
-    if not hum then return nil end
-    local tool = LocalPlayer.Backpack:FindFirstChild(itemName)
-    if not tool and char then tool = char:FindFirstChild(itemName) end
-    if not tool then return nil end
-    if tool.Parent == LocalPlayer.Backpack then
-        local ok = pcall(function() hum:EquipTool(tool) end)
-        if not ok then return nil end
-        task.wait(0.08)
-    end
-    local deadline = tick() + 0.35
-    while tool.Parent ~= char and tick() < deadline do task.wait() end
-    if tool.Parent ~= char then return nil end
-    return tool
-end
-
-local function runMerchantSellDialogue(itemName, beforeCount)
-    local lastOptions = ""
-    local repeated = 0
-
-    for step = 1, 7 do
-        if countItem(itemName) < beforeCount then return true end
-
-        local buttons = waitForDialogueButtons(step == 1 and 3 or 2)
-        if #buttons == 0 then
-            task.wait(0.35)
-            if countItem(itemName) < beforeCount then return true end
-            return false
-        end
-
-        local description = ""
-        for _, e in ipairs(buttons) do description = description .. e.Text .. " | " end
-
-        if description == lastOptions then
-            repeated = repeated + 1
-        else
-            repeated = 0
-            lastOptions = description
-        end
-
-        if repeated >= 2 then return false end
-
-        local chosen = chooseBestSellButton(buttons)
-        if not chosen then return false end
-
-        if not clickButton(chosen.Button) then return false end
-        task.wait(0.5)
-    end
-
-    return countItem(itemName) < beforeCount
-end
-
-local function getSellableItems()
-    local items = {}
-    local seen = {}
-    local function addItem(name)
-        if not seen[name] and SellItems[name] then
-            seen[name] = true
-            table.insert(items, name)
-        end
-    end
-    if LocalPlayer.Backpack then
-        for _, tool in ipairs(LocalPlayer.Backpack:GetChildren()) do
-            if tool:IsA("Tool") then addItem(tool.Name) end
-        end
-    end
-    if LocalPlayer.Character then
-        for _, obj in ipairs(LocalPlayer.Character:GetChildren()) do
-            if obj:IsA("Tool") then addItem(obj.Name) end
-        end
-    end
-    return items
-end
-
-local function startSellMouseSpam()
-    if sellSpamThread then return end
-    sellSpamThread = task.spawn(function()
-        while sellingNow do
-            pcall(function()
-                VirtualInputManager:SendMouseButtonEvent(Config.SellMouseX, Config.SellMouseY, 0, true, game, 1)
-                task.wait(0.01)
-                VirtualInputManager:SendMouseButtonEvent(Config.SellMouseX, Config.SellMouseY, 0, false, game, 1)
-            end)
-            task.wait(0.5)
-        end
-    end)
-end
-
-local function stopSellMouseSpam()
-    if sellSpamThread then
-        pcall(function() task.cancel(sellSpamThread) end)
-        sellSpamThread = nil
-    end
-end
-
-local function sellAllNow()
-    if sellingNow then return false, "Already selling" end
-
-    local merchantPrompt = findMerchantPrompt()
-    if not merchantPrompt then return false, "Merchant not found" end
-
-    local toSell = getSellableItems()
-    if #toSell == 0 then return false, "Nothing to sell" end
-
-    sellingNow = true
-    startSellMouseSpam()
-
-    local soldTypes = 0
-    for _, itemName in ipairs(toSell) do
-        if not sellingNow then break end
-        local initialCount = countItem(itemName)
-        if initialCount > 0 then
-            equipTool(itemName)
-            closeDialogueIfOpen()
-            pcall(function() fireproximityprompt(merchantPrompt) end)
-            task.wait(0.45)
-
-            local before = countItem(itemName)
-            runMerchantSellDialogue(itemName, before)
-            task.wait(0.5)
-
-            local after = countItem(itemName)
-            if after < initialCount then soldTypes = soldTypes + 1 end
-            closeDialogueIfOpen()
-        end
-        task.wait(0.05)
-    end
-
-    sellingNow = false
-    stopSellMouseSpam()
-    sendCustomWebhook("**Auto Sell** | Ник: " .. LocalPlayer.Name .. " | Sold types: " .. soldTypes .. "/" .. #toSell)
-    return true, "Sold types: " .. soldTypes .. "/" .. #toSell
-end
 
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "VoidYBAFarm"
@@ -1789,46 +1624,15 @@ sellHeader.TextSize = 13
 sellHeader.TextXAlignment = Enum.TextXAlignment.Left
 sellHeader.Parent = SellScroll
 
-makeToggleScrolling(SellScroll, "Auto Sell Loop (500ms)", Config.AutoSell, function(state)
+makeToggleScrolling(SellScroll, "Auto Sell Loop", Config.AutoSell, function(state)
     Config.AutoSell = state
     saveConfig()
     if state then
-        if not autoSellManualThread then
-            autoSellManualThread = task.spawn(function()
-                while Config.AutoSell do
-                    if sellingNow then
-                        task.wait(0.5)
-                    else
-                        pcall(sellAllNow)
-                        task.wait(0.5)
-                    end
-                end
-            end)
-        end
+        startAutoSell()
     else
-        if autoSellManualThread then
-            pcall(function() task.cancel(autoSellManualThread) end)
-            autoSellManualThread = nil
-        end
-        sellingNow = false
-        stopSellMouseSpam()
+        stopAutoSell()
     end
 end)
-
-local function makeSellButton(parent, text, callback, color)
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, -8, 0, 32)
-    btn.BackgroundColor3 = color or Color3.fromRGB(40, 90, 200)
-    btn.BorderSizePixel = 0
-    btn.Text = text
-    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    btn.Font = Enum.Font.GothamBold
-    btn.TextSize = 13
-    btn.Parent = parent
-    local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 5) c.Parent = btn
-    btn.MouseButton1Click:Connect(callback)
-    return btn
-end
 
 local sellStatusLabel = Instance.new("TextLabel")
 sellStatusLabel.Size = UDim2.new(1, -8, 0, 20)
@@ -1839,109 +1643,6 @@ sellStatusLabel.Font = Enum.Font.Gotham
 sellStatusLabel.TextSize = 11
 sellStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
 sellStatusLabel.Parent = SellScroll
-
-makeSellButton(SellScroll, "SELL ALL NOW", function()
-    sellStatusLabel.Text = "Selling..."
-    task.spawn(function()
-        local ok, msg = sellAllNow()
-        sellStatusLabel.Text = msg or (ok and "Done" or "Failed")
-        task.wait(3)
-        sellStatusLabel.Text = ""
-    end)
-end, Color3.fromRGB(40, 90, 200))
-
-local mouseHeader = Instance.new("TextLabel")
-mouseHeader.Size = UDim2.new(1, -8, 0, 24)
-mouseHeader.BackgroundTransparency = 1
-mouseHeader.Text = "⚙ MOUSE SPAM (500ms)"
-mouseHeader.TextColor3 = Color3.fromRGB(220, 50, 50)
-mouseHeader.Font = Enum.Font.GothamBold
-mouseHeader.TextSize = 13
-mouseHeader.TextXAlignment = Enum.TextXAlignment.Left
-mouseHeader.Parent = SellScroll
-
-local function makeSliderScrolling(parent, text, min, max, default, callback)
-    local holder = Instance.new("Frame")
-    holder.Size = UDim2.new(1, -8, 0, 42)
-    holder.BackgroundTransparency = 1
-    holder.Parent = parent
-
-    local label = Instance.new("TextLabel")
-    label.Size = UDim2.new(0.6, 0, 0, 18)
-    label.BackgroundTransparency = 1
-    label.Text = text
-    label.TextColor3 = Color3.fromRGB(210, 210, 220)
-    label.Font = Enum.Font.Gotham
-    label.TextSize = 13
-    label.TextXAlignment = Enum.TextXAlignment.Left
-    label.Parent = holder
-
-    local valBox = Instance.new("TextBox")
-    valBox.Size = UDim2.new(0, 70, 0, 20)
-    valBox.Position = UDim2.new(1, -74, 0, 0)
-    valBox.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
-    valBox.BorderSizePixel = 0
-    valBox.Text = tostring(default)
-    valBox.TextColor3 = Color3.fromRGB(255, 255, 255)
-    valBox.Font = Enum.Font.Gotham
-    valBox.TextSize = 12
-    valBox.Parent = holder
-    local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 4) c.Parent = valBox
-
-    local bar = Instance.new("Frame")
-    bar.Size = UDim2.new(1, -8, 0, 8)
-    bar.Position = UDim2.new(0, 4, 0, 26)
-    bar.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
-    bar.BorderSizePixel = 0
-    bar.Parent = holder
-    local bc = Instance.new("UICorner") bc.CornerRadius = UDim.new(0, 4) bc.Parent = bar
-
-    local fill = Instance.new("Frame")
-    fill.Size = UDim2.new((default - min) / (max - min), 0, 1, 0)
-    fill.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
-    fill.BorderSizePixel = 0
-    fill.Parent = bar
-    local fc = Instance.new("UICorner") fc.CornerRadius = UDim.new(0, 4) fc.Parent = fill
-
-    local dragging = false
-    local function setValue(v)
-        v = math.clamp(v, min, max)
-        fill.Size = UDim2.new((v - min) / (max - min), 0, 1, 0)
-        valBox.Text = tostring(math.floor(v))
-        if callback then callback(math.floor(v)) end
-    end
-
-    bar.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = true
-        end
-    end)
-    UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = false
-        end
-    end)
-    UserInputService.InputChanged:Connect(function(input)
-        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-            local rel = (input.Position.X - bar.AbsolutePosition.X) / bar.AbsoluteSize.X
-            setValue(min + rel * (max - min))
-        end
-    end)
-    valBox.FocusLost:Connect(function()
-        local n = tonumber(valBox.Text)
-        if n then setValue(n) else valBox.Text = tostring(default) end
-    end)
-end
-
-makeSliderScrolling(SellScroll, "Mouse X", 0, 3000, Config.SellMouseX, function(v)
-    Config.SellMouseX = v
-    saveConfig()
-end)
-
-makeSliderScrolling(SellScroll, "Mouse Y", 0, 3000, Config.SellMouseY, function(v)
-    Config.SellMouseY = v
-    saveConfig()
-end)
 
 local webhookHeader = Instance.new("TextLabel")
 webhookHeader.Size = UDim2.new(1, -8, 0, 24)
@@ -2105,16 +1806,7 @@ applyRenderDistance(Config.RenderDistance)
 if Config.RemoveTrees then removeTreesAndBushes() end
 if Config.ServerHop then startServerHop() end
 if Config.AutoSell then
-    autoSellManualThread = task.spawn(function()
-        while Config.AutoSell do
-            if sellingNow then
-                task.wait(0.5)
-            else
-                pcall(sellAllNow)
-                task.wait(0.5)
-            end
-        end
-    end)
+    startAutoSell()
 end
 setNoclip(true)
 setWeather(WEATHER_VALUE)
@@ -2164,8 +1856,7 @@ _G.VoidYBAFarm.cleanup = function()
     if infoConnection then pcall(function() infoConnection:Disconnect() end) end
 
     if farmCoroutine then pcall(function() task.cancel(farmCoroutine) end) end
-    if sellSpamThread then pcall(function() task.cancel(sellSpamThread) end) end
-    if autoSellManualThread then pcall(function() task.cancel(autoSellManualThread) end) end
+    if autoSellLoopThread then pcall(function() task.cancel(autoSellLoopThread) end) end
     if autoStealThread then pcall(function() task.cancel(autoStealThread) end) end
 
     if cameraNoclipEnabled then pcall(disableCameraNoclip) end
