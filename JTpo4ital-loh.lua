@@ -11,46 +11,55 @@ local MarketplaceService = game:GetService("MarketplaceService")
 
 local LocalPlayer = Players.LocalPlayer
 
-local REJOIN_FLAG_FILE = "void_yba_rejoined.flag"
-local IS_REJOINED = false
+local START_FARM_SCRIPT
 
-if isfile and isfile(REJOIN_FLAG_FILE) then
-    IS_REJOINED = true
-    pcall(function() delfile(REJOIN_FLAG_FILE) end)
-end
-
-if IS_REJOINED then
-    task.spawn(function()
-        task.wait(3)
-        pcall(function()
-            local pg = LocalPlayer:WaitForChild("PlayerGui", 15)
-            if not pg then return end
-            local ls = pg:WaitForChild("LoadingScreen", 15)
-            if not ls then return end
-            local frames = ls:WaitForChild("Frames", 10)
-            if not frames then return end
-            local main = frames:WaitForChild("Main", 10)
-            if not main then return end
-            local playBtn = main:WaitForChild("Play", 10)
-            if not playBtn then return end
-
-            if firesignal then
-                pcall(function() firesignal(playBtn.MouseButton1Click) end)
-            elseif getconnections then
-                for _, c in ipairs(getconnections(playBtn.MouseButton1Click)) do
-                    pcall(function() c.Function() end)
-                end
+task.spawn(function()
+    task.wait(1)
+    local LoadingScreen = LocalPlayer.PlayerGui:FindFirstChild("LoadingScreen")
+    
+    if LoadingScreen then
+        local PlayBtn
+        for i = 1, 30 do
+            PlayBtn = LoadingScreen:FindFirstChild("Frames") and LoadingScreen.Frames:FindFirstChild("Main") and LoadingScreen.Frames.Main:FindFirstChild("Play")
+            if PlayBtn then break end
+            task.wait(0.1)
+        end
+        
+        if PlayBtn then
+            for i = 1, 5 do
+                pcall(function()
+                    if firesignal then
+                        firesignal(PlayBtn.MouseButton1Click)
+                    elseif getconnections then
+                        for _, c in ipairs(getconnections(PlayBtn.MouseButton1Click)) do
+                            c:Fire()
+                        end
+                    end
+                end)
+                
+                pcall(function()
+                    VirtualInputManager:SendMouseButtonEvent(PlayBtn.AbsolutePosition.X + PlayBtn.AbsoluteSize.X / 2, PlayBtn.AbsolutePosition.Y + PlayBtn.AbsoluteSize.Y / 2 + 36, 0, true, game, 1)
+                    task.wait(0.05)
+                    VirtualInputManager:SendMouseButtonEvent(PlayBtn.AbsolutePosition.X + PlayBtn.AbsoluteSize.X / 2, PlayBtn.AbsolutePosition.Y + PlayBtn.AbsoluteSize.Y / 2 + 36, 0, false, game, 1)
+                end)
+                
+                task.wait(0.2)
             end
-            pcall(function()
-                local p = playBtn.AbsolutePosition
-                local s = playBtn.AbsoluteSize
-                VirtualInputManager:SendMouseButtonEvent(p.X + s.X / 2, p.Y + s.Y / 2 + 36, 0, true, game, 1)
-                task.wait(0.05)
-                VirtualInputManager:SendMouseButtonEvent(p.X + s.X / 2, p.Y + s.Y / 2 + 36, 0, false, game, 1)
-            end)
-        end)
-    end)
-end
+        end
+
+        for i = 1, 15 do
+            if not LocalPlayer.PlayerGui:FindFirstChild("LoadingScreen") then break end
+            task.wait(0.2)
+        end
+    end
+    
+    task.wait(1)
+    if START_FARM_SCRIPT then
+        START_FARM_SCRIPT()
+    end
+end)
+
+START_FARM_SCRIPT = function()
 
 if _G.VoidYBAFarm then
     pcall(function()
@@ -1184,37 +1193,6 @@ local function startServerHop()
     end)
 end
 
-local function skipLoading()
-    task.spawn(function()
-        if Lighting:FindFirstChild("DepthOfField") then
-            Lighting.DepthOfField:Destroy()
-        end
-    end)
-    pcall(function()
-        if workspace.Map and workspace.Map.IMPORTANT and workspace.Map.IMPORTANT.OceanFloor then
-            local of = workspace.Map.IMPORTANT.OceanFloor
-            if of:FindFirstChild("OceanFloor_Sand_6") then
-                of.OceanFloor_Sand_6.Size = Vector3.new(2048, 89, 2048)
-            end
-            if of:FindFirstChild("OceanFloor_Sand_4") then
-                of.OceanFloor_Sand_4.Size = Vector3.new(2048, 89, 2048)
-            end
-        end
-    end)
-    task.spawn(function()
-        local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-        if not playerGui then
-            local ok, result = pcall(function() return LocalPlayer:WaitForChild("PlayerGui", 10) end)
-            if ok then playerGui = result end
-        end
-        if not playerGui then return end
-        if playerGui:FindFirstChild("LoadingScreen1") then playerGui.LoadingScreen1:Destroy() end
-        if playerGui:FindFirstChild("LoadingScreen") then playerGui.LoadingScreen:Destroy() end
-    end)
-end
-
-skipLoading()
-
 local function ForceClick(optionName)
     local DialogueGui = LocalPlayer.PlayerGui:FindFirstChild("DialogueGui")
     if not DialogueGui then return end
@@ -1401,7 +1379,9 @@ local kickConn = CoreGui.DescendantAdded:Connect(function(child)
         if GrabError then
             repeat task.wait() until GrabError.Text ~= "Label"
             local Reason = GrabError.Text
-            if Reason:match("kick") or Reason:match("You") or Reason:match("conn") or Reason:match("rejoin") then
+            
+            local lowerReason = string.lower(Reason)
+            if lowerReason:match("kick") or lowerReason:match("you") or lowerReason:match("conn") or lowerReason:match("rejoin") or lowerReason:match("exploit") then
                 sendCustomWebhook("**КИКНУТ** | Ник: " .. LocalPlayer.Name .. " | Причина: " .. Reason)
 
                 if writefile then
@@ -1410,11 +1390,17 @@ local kickConn = CoreGui.DescendantAdded:Connect(function(child)
                     end)
                 end
 
-                task.wait(0.5)
+                task.wait(1)
 
-                pcall(function()
-                    TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+                local success = pcall(function()
+                    TeleportService:Teleport(game.PlaceId, LocalPlayer)
                 end)
+
+                if not success then
+                    pcall(function()
+                        game:GetService("TeleportService"):TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+                    end)
+                end
             end
         end
     end
@@ -2360,4 +2346,11 @@ _G.VoidYBAFarm.cleanup = function()
     if _G.VoidYBAFarm.gui then
         pcall(function() _G.VoidYBAFarm.gui:Destroy() end)
     end
+end
+local queueFunc = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
+
+if queueFunc then
+    local scriptUrl = "https://raw.githubusercontent.com/KELLOnELLO/ArtMitUbludok/refs/heads/main/JTpo4ital-loh.lua"
+    queueFunc("loadstring(game:HttpGet('" .. scriptUrl .. "'))()")
+end
 end
