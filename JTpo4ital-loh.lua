@@ -12,19 +12,25 @@ local MarketplaceService = game:GetService("MarketplaceService")
 local LocalPlayer = Players.LocalPlayer
 
 local START_FARM_SCRIPT
+local scriptStarted = false
+
+local function tryStartScript()
+    if scriptStarted then return end
+    scriptStarted = true
+    if START_FARM_SCRIPT then
+        START_FARM_SCRIPT()
+    end
+end
 
 task.spawn(function()
-    task.wait(1)
-    local LoadingScreen = LocalPlayer.PlayerGui:FindFirstChild("LoadingScreen")
-    
-    if LoadingScreen then
+    while true do
+        local LoadingScreen = LocalPlayer.PlayerGui:FindFirstChild("LoadingScreen")
         local PlayBtn
-        for i = 1, 30 do
+
+        if LoadingScreen then
             PlayBtn = LoadingScreen:FindFirstChild("Frames") and LoadingScreen.Frames:FindFirstChild("Main") and LoadingScreen.Frames.Main:FindFirstChild("Play")
-            if PlayBtn then break end
-            task.wait(0.1)
         end
-        
+
         if PlayBtn then
             for i = 1, 5 do
                 pcall(function()
@@ -45,17 +51,17 @@ task.spawn(function()
                 
                 task.wait(0.2)
             end
+        else
+            if not LoadingScreen then
+                task.wait(2)
+                if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                    tryStartScript()
+                    break
+                end
+            end
         end
 
-        for i = 1, 15 do
-            if not LocalPlayer.PlayerGui:FindFirstChild("LoadingScreen") then break end
-            task.wait(0.2)
-        end
-    end
-    
-    task.wait(1)
-    if START_FARM_SCRIPT then
-        START_FARM_SCRIPT()
+        task.wait(5)
     end
 end)
 
@@ -1059,6 +1065,49 @@ local function waitForPickup(item, timeout)
     return false
 end
 
+local hpMonitorThread = nil
+local lastHP = 1
+local hpRestartPending = false
+
+local function startHPMonitor()
+    if hpMonitorThread then return end
+    hpMonitorThread = task.spawn(function()
+        while autofarmEnabled do
+            task.wait(0.5)
+            local char = LocalPlayer.Character
+            if not char then continue end
+            local humanoid = char:FindFirstChildOfClass("Humanoid")
+            if not humanoid then continue end
+            
+            local hpPercent = humanoid.Health / humanoid.MaxHealth
+            if hpPercent < 0.05 and lastHP >= 0.05 and not hpRestartPending then
+                hpRestartPending = true
+                task.spawn(function()
+                    task.wait(6)
+                    if autofarmEnabled and not hpRestartPending then return end
+                    if autofarmEnabled then
+                        disableAnim()
+                        task.wait(0.1)
+                        if autofarmEnabled then
+                            enableAnim()
+                        end
+                    end
+                    hpRestartPending = false
+                end)
+            end
+            lastHP = hpPercent
+        end
+    end)
+end
+
+local function stopHPMonitor()
+    if hpMonitorThread then
+        pcall(function() task.cancel(hpMonitorThread) end)
+        hpMonitorThread = nil
+    end
+    lastHP = 1
+end
+
 local function autofarmLoop()
     while autofarmEnabled do
         local char = LocalPlayer.Character
@@ -1121,6 +1170,7 @@ local function startAutofarm()
     pickedItems = {}
     lastPickedItem = "—"
     enableAnim()
+    startHPMonitor()
     farmCoroutine = task.spawn(autofarmLoop)
     sendCustomWebhook("**Autofarm: ВКЛЮЧЕН** | Ник: " .. LocalPlayer.Name .. " | Игра: " .. game.PlaceId)
 end
@@ -1393,12 +1443,12 @@ local kickConn = CoreGui.DescendantAdded:Connect(function(child)
                 task.wait(1)
 
                 local success = pcall(function()
-                    TeleportService:Teleport(game.PlaceId, LocalPlayer)
+                    TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
                 end)
 
                 if not success then
                     pcall(function()
-                        game:GetService("TeleportService"):TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+                        TeleportService:Teleport(game.PlaceId, LocalPlayer)
                     end)
                 end
             end
@@ -2302,6 +2352,7 @@ _G.VoidYBAFarm.cleanup = function()
     autofarmEnabled = false
     sellingNow = false
     infoEnabled = false
+    stopHPMonitor()
 
     for _, conn in ipairs(_G.VoidYBAFarm.connections) do
         pcall(function() conn:Disconnect() end)
