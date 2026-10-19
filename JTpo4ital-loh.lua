@@ -719,20 +719,69 @@ local function buildItemsList()
     return table.concat(list, "\n")
 end
 
+local startFarmTime = 0
+local totalSoldCount = 0
+local hopCount = 0
+local lastJobId = game.JobId
+local transparencyBackup = {}
+local overlayConn = nil
+
+local function formatNumber(n)
+    local formatted = tostring(math.floor(n))
+    while true do
+        formatted, k = formatted:gsub("^(-?%d+)(%d%d%d)", '%1,%2')
+        if k == 0 then break end
+    end
+    return formatted
+end
+
+local function formatTime(seconds)
+    local h = math.floor(seconds / 3600)
+    local m = math.floor((seconds % 3600) / 60)
+    local s = math.floor(seconds % 60)
+    return string.format("%02d:%02d:%02d", h, m, s)
+end
+
 local function enable3DOff()
     threeDDisabled = true
-    pcall(function()
-        for _, obj in ipairs(workspace:GetDescendants()) do
-            if obj:IsA("BasePart") then obj.LocalTransparencyModifier = 1 end
+    startFarmTime = tick()
+    transparencyBackup = {}
+    
+    local function applyTransparency()
+        pcall(function()
+            for _, obj in ipairs(workspace:GetDescendants()) do
+                if obj:IsA("BasePart") then
+                    if transparencyBackup[obj] == nil then
+                        transparencyBackup[obj] = obj.LocalTransparencyModifier
+                    end
+                    obj.LocalTransparencyModifier = 1
+                end
+            end
+        end)
+    end
+
+    applyTransparency()
+
+    if overlayConn then overlayConn:Disconnect() end
+    overlayConn = workspace.DescendantAdded:Connect(function(obj)
+        if threeDDisabled and obj:IsA("BasePart") then
+            task.wait()
+            if threeDDisabled and obj.Parent then
+                if transparencyBackup[obj] == nil then
+                    transparencyBackup[obj] = obj.LocalTransparencyModifier
+                end
+                obj.LocalTransparencyModifier = 1
+            end
         end
     end)
+
     if threeDOverlay then threeDOverlay:Destroy() end
 
     local gui = Instance.new("ScreenGui")
     gui.Name = "Void3DOffOverlay"
     gui.ResetOnSpawn = false
     gui.IgnoreGuiInset = true
-    gui.DisplayOrder = -1
+    gui.DisplayOrder = 999
     gui.ZIndexBehavior = Enum.ZIndexBehavior.Global
     pcall(function() gui.Parent = CoreGui end)
     if not gui.Parent then gui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
@@ -743,66 +792,194 @@ local function enable3DOff()
     bg.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
     bg.BorderSizePixel = 0
     bg.ZIndex = 1
-    bg.Active = false
+    bg.Active = true
     bg.Parent = gui
 
-    local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1, 0, 0, 40)
-    title.Position = UDim2.new(0, 0, 0.05, 0)
-    title.BackgroundTransparency = 1
-    title.Text = "ПОСЛЕДНИЙ СОБРАННЫЙ ПРЕДМЕТ:"
-    title.TextColor3 = Color3.fromRGB(255, 255, 255)
-    title.Font = Enum.Font.GothamBold
-    title.TextSize = 28
-    title.ZIndex = 2
-    title.Parent = bg
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Size = UDim2.new(0, 600, 0, 400)
+    mainFrame.Position = UDim2.new(0.5, -300, 0.5, -200)
+    mainFrame.BackgroundTransparency = 1
+    mainFrame.Parent = bg
 
-    local lastItem = Instance.new("TextLabel")
-    lastItem.Size = UDim2.new(1, 0, 0, 50)
-    lastItem.Position = UDim2.new(0, 0, 0.05, 45)
-    lastItem.BackgroundTransparency = 1
-    lastItem.Text = lastPickedItem
-    lastItem.TextColor3 = Color3.fromRGB(180, 40, 40)
-    lastItem.Font = Enum.Font.GothamBold
-    lastItem.TextSize = 40
-    lastItem.ZIndex = 2
-    lastItem.Parent = bg
+    local earned = Instance.new("TextLabel")
+    earned.Size = UDim2.new(1, 0, 0, 50)
+    earned.BackgroundTransparency = 1
+    earned.Text = "+$0"
+    earned.TextColor3 = Color3.fromRGB(255, 255, 255)
+    earned.Font = Enum.Font.Code
+    earned.TextSize = 36
+    earned.ZIndex = 2
+    earned.Parent = mainFrame
 
-    local list = Instance.new("TextLabel")
-    list.Size = UDim2.new(1, -40, 0.6, 0)
-    list.Position = UDim2.new(0, 20, 0.25, 0)
-    list.BackgroundTransparency = 1
-    list.Text = buildItemsList()
-    list.TextColor3 = Color3.fromRGB(160, 160, 170)
-    list.Font = Enum.Font.Gotham
-    list.TextSize = 14
-    list.TextWrapped = true
-    list.TextYAlignment = Enum.TextYAlignment.Top
-    list.ZIndex = 2
-    list.Parent = bg
+    local earnedLbl = Instance.new("TextLabel")
+    earnedLbl.Size = UDim2.new(1, 0, 0, 20)
+    earnedLbl.Position = UDim2.new(0, 0, 0, 50)
+    earnedLbl.BackgroundTransparency = 1
+    earnedLbl.Text = "Earned"
+    earnedLbl.TextColor3 = Color3.fromRGB(100, 100, 100)
+    earnedLbl.Font = Enum.Font.Code
+    earnedLbl.TextSize = 14
+    earnedLbl.ZIndex = 2
+    earnedLbl.Parent = mainFrame
 
-    local stats = Instance.new("TextLabel")
-    stats.Size = UDim2.new(1, 0, 0, 24)
-    stats.Position = UDim2.new(0, 0, 0.93, 0)
-    stats.BackgroundTransparency = 1
-    stats.Text = "Собрано: " .. totalPicked .. " | ТП: " .. totalTPs
-    stats.TextColor3 = Color3.fromRGB(120, 120, 130)
-    stats.Font = Enum.Font.Gotham
-    stats.TextSize = 16
-    stats.ZIndex = 2
-    stats.Parent = bg
+    local loadingLbl = Instance.new("TextLabel")
+    loadingLbl.Size = UDim2.new(1, 0, 0, 20)
+    loadingLbl.Position = UDim2.new(0, 0, 0, 80)
+    loadingLbl.BackgroundTransparency = 1
+    loadingLbl.Text = "Loading"
+    loadingLbl.TextColor3 = Color3.fromRGB(100, 100, 100)
+    loadingLbl.Font = Enum.Font.Code
+    loadingLbl.TextSize = 14
+    loadingLbl.ZIndex = 2
+    loadingLbl.Parent = mainFrame
+
+    local grid = Instance.new("Frame")
+    grid.Size = UDim2.new(0, 500, 0, 250)
+    grid.Position = UDim2.new(0.5, -250, 0, 140)
+    grid.BackgroundTransparency = 1
+    grid.ZIndex = 2
+    grid.Parent = mainFrame
+
+    local gridLayout = Instance.new("UIGridLayout")
+    gridLayout.CellSize = UDim2.new(0.5, -10, 0, 70)
+    gridLayout.CellPadding = UDim2.new(0, 20, 0, 10)
+    gridLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    gridLayout.Parent = grid
+
+    local function createStatCell(order, title, initVal, valColor)
+        local cell = Instance.new("Frame")
+        cell.BackgroundTransparency = 1
+        cell.LayoutOrder = order
+        cell.Parent = grid
+
+        local tLbl = Instance.new("TextLabel")
+        tLbl.Size = UDim2.new(1, 0, 0, 20)
+        tLbl.BackgroundTransparency = 1
+        tLbl.Text = title
+        tLbl.TextColor3 = Color3.fromRGB(100, 100, 100)
+        tLbl.Font = Enum.Font.Code
+        tLbl.TextSize = 14
+        tLbl.ZIndex = 2
+        tLbl.Parent = cell
+
+        local vLbl = Instance.new("TextLabel")
+        vLbl.Size = UDim2.new(1, 0, 0, 40)
+        vLbl.Position = UDim2.new(0, 0, 0, 20)
+        vLbl.BackgroundTransparency = 1
+        vLbl.Text = tostring(initVal)
+        vLbl.TextColor3 = valColor or Color3.fromRGB(255, 255, 255)
+        vLbl.Font = Enum.Font.Code
+        vLbl.TextSize = 28
+        vLbl.ZIndex = 2
+        vLbl.Parent = cell
+        return vLbl
+    end
+
+    local balanceLbl = createStatCell(1, "Balance", "$0")
+    local farmTimeLbl = createStatCell(2, "Farm Time", "00:00:00")
+    local pickedLbl = createStatCell(3, "Picked Up", "0")
+    local soldLbl = createStatCell(4, "Sold", "0")
+    local backpackLbl = createStatCell(5, "In Backpack", "0")
+    local arrowsLbl = createStatCell(6, "Lucky Arrows", "0 / 0")
+    local hopsLbl = createStatCell(7, "Hops", "0")
+    local pingLbl = createStatCell(8, "Ping", "0 ms", Color3.fromRGB(255, 200, 0))
+
+    local startBalance = 0
+    task.spawn(function()
+        pcall(function()
+            local ls = LocalPlayer:WaitForChild("leaderstats", 10)
+            if ls then
+                local cash = ls:FindFirstChild("Cash") or ls:FindFirstChild("Money") or ls:FindFirstChild("Balance")
+                if cash then startBalance = cash.Value end
+            end
+        end)
+    end)
 
     threeDOverlay = gui
-    overlayLabels = {lastItem = lastItem, list = list, stats = stats}
+    overlayLabels = {
+        earned = earned,
+        balance = balanceLbl,
+        farmTime = farmTimeLbl,
+        picked = pickedLbl,
+        sold = soldLbl,
+        backpack = backpackLbl,
+        arrows = arrowsLbl,
+        hops = hopsLbl,
+        ping = pingLbl
+    }
+
+    task.spawn(function()
+        while threeDDisabled and threeDOverlay do
+            task.wait(0.5)
+            if not threeDOverlay then break end
+            pcall(function()
+                local ls = LocalPlayer:FindFirstChild("leaderstats")
+                local cashVal = 0
+                if ls then
+                    local cash = ls:FindFirstChild("Cash") or ls:FindFirstChild("Money") or ls:FindFirstChild("Balance")
+                    if cash then cashVal = cash.Value end
+                end
+
+                if startBalance == 0 then startBalance = cashVal end
+                local earnedVal = math.max(0, cashVal - startBalance)
+                earned.Text = "+$" .. formatNumber(earnedVal)
+                balanceLbl.Text = "$" .. formatNumber(cashVal)
+
+                local elapsed = tick() - startFarmTime
+                farmTimeLbl.Text = formatTime(elapsed)
+
+                pickedLbl.Text = tostring(totalPicked)
+                soldLbl.Text = tostring(totalSoldCount)
+
+                local bpCount = 0
+                if LocalPlayer.Backpack then
+                    bpCount = #LocalPlayer.Backpack:GetChildren()
+                end
+                if LocalPlayer.Character then
+                    for _, c in ipairs(LocalPlayer.Character:GetChildren()) do
+                        if c:IsA("Tool") then bpCount = bpCount + 1 end
+                    end
+                end
+                backpackLbl.Text = tostring(bpCount)
+
+                local arrowCurrent = countItem("Lucky Arrow")
+                local arrowMax = getMaxAmount("Lucky Arrow")
+                arrowsLbl.Text = tostring(arrowCurrent) .. " / " .. tostring(arrowMax)
+
+                if game.JobId ~= lastJobId then
+                    hopCount = hopCount + 1
+                    lastJobId = game.JobId
+                end
+                hopsLbl.Text = tostring(hopCount)
+
+                local ping = 0
+                local stats = game:GetService("Stats")
+                local net = stats and stats.Network
+                if net and net.ServerStatsItem then
+                    local pingItem = net.ServerStatsItem["Data Ping"]
+                    if pingItem then ping = pingItem:GetValue() end
+                end
+                pingLbl.Text = string.format("%d ms", ping)
+            end)
+        end
+    end)
 end
 
 local function disable3DOff()
     threeDDisabled = false
+    if overlayConn then
+        overlayConn:Disconnect()
+        overlayConn = nil
+    end
     pcall(function()
-        for _, obj in ipairs(workspace:GetDescendants()) do
-            if obj:IsA("BasePart") then obj.LocalTransparencyModifier = 0 end
+        for obj, orig in pairs(transparencyBackup) do
+            if obj and obj.Parent then
+                pcall(function() obj.LocalTransparencyModifier = orig or 0 end)
+            end
         end
     end)
+    transparencyBackup = {}
+    
     if threeDOverlay then
         threeDOverlay:Destroy()
         threeDOverlay = nil
@@ -815,12 +992,6 @@ local function set3DOff(state)
 end
 
 local function update3DOverlay()
-    if not threeDOverlay or not overlayLabels then return end
-    if overlayLabels.lastItem then overlayLabels.lastItem.Text = lastPickedItem end
-    if overlayLabels.list then overlayLabels.list.Text = buildItemsList() end
-    if overlayLabels.stats then
-        overlayLabels.stats.Text = "Собрано: " .. totalPicked .. " | ТП: " .. totalTPs
-    end
 end
 
 local function enableAnim()
@@ -913,7 +1084,6 @@ local function autofarmLoop()
                             local itemName = entry.name or entry.item.Name
                             table.insert(pickedItems, itemName)
                             lastPickedItem = itemName
-                            update3DOverlay()
                         end
                         currentTarget = nil
                         if cameraInItemEnabled then
@@ -943,7 +1113,6 @@ local function startAutofarm()
     lastPickedItem = "—"
     enableAnim()
     farmCoroutine = task.spawn(autofarmLoop)
-    update3DOverlay()
     sendCustomWebhook("**Autofarm: ВКЛЮЧЕН** | Ник: " .. LocalPlayer.Name .. " | Игра: " .. game.PlaceId)
 end
 
