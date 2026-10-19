@@ -97,12 +97,18 @@ local Config = {
     ServerHop = false,
     TPOffset = 10,
     TPSpeed = 1.0,
+    TPCooldown = 0.15,
     AutoSell = false,
     SellMouseX = 1236,
     SellMouseY = 681,
     WebhookURL = "",
     CameraInItem = false,
     InfoEnabled = false,
+    ShowClock = true,
+    OptLowGraphics = false,
+    OptDisableShadows = false,
+    OptRemoveParticles = false,
+    OptRemoveWeather = false,
 }
 
 local SELL_ITEMS_DEFAULT = {
@@ -145,6 +151,11 @@ for _, name in ipairs(SELL_ITEMS_DEFAULT) do
     SellItems[name] = true
 end
 
+local CollectItems = {}
+for _, name in ipairs(SELL_ITEMS_DEFAULT) do
+    CollectItems[name] = true
+end
+
 local CONFIG_FILE = "void_yba_config.json"
 
 local function loadConfig()
@@ -154,12 +165,15 @@ local function loadConfig()
         end)
         if ok and type(data) == "table" then
             for k, v in pairs(data) do
-                if k ~= "SellItems" then
+                if k ~= "SellItems" and k ~= "CollectItems" then
                     Config[k] = v
                 end
             end
             if type(data.SellItems) == "table" then
                 SellItems = data.SellItems
+            end
+            if type(data.CollectItems) == "table" then
+                CollectItems = data.CollectItems
             end
         end
     end
@@ -170,6 +184,7 @@ local function saveConfig()
         local out = {}
         for k, v in pairs(Config) do out[k] = v end
         out.SellItems = SellItems
+        out.CollectItems = CollectItems
         pcall(function()
             writefile(CONFIG_FILE, HttpService:JSONEncode(out))
         end)
@@ -245,11 +260,64 @@ local function applyRenderDistance(dist)
 end
 
 local function removeTreesAndBushes()
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj.Name == "Tree" or obj.Name == "Bush" then
-            obj:Destroy()
+    task.spawn(function()
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj.Name == "Tree" or obj.Name == "Bush" then
+                obj:Destroy()
+            end
+            task.wait()
         end
-    end
+    end)
+end
+
+local function setLowGraphics(state)
+    pcall(function()
+        if state then
+            settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+            Lighting.GlobalShadows = false
+            Lighting.FogEnd = 0
+            Lighting.Brightness = 0
+        else
+            settings().Rendering.QualityLevel = Enum.QualityLevel.Automatic
+            Lighting.GlobalShadows = true
+            Lighting.FogEnd = 100000
+            Lighting.Brightness = 2
+        end
+    end)
+end
+
+local function setDisableShadows(state)
+    pcall(function()
+        for _, obj in ipairs(Lighting:GetChildren()) do
+            if obj:IsA("SunRaysEffect") or obj:IsA("BloomEffect") or obj:IsA("BlurEffect") or obj:IsA("ColorCorrectionEffect") then
+                obj.Enabled = not state
+            end
+        end
+        if state then
+            Lighting.GlobalShadows = false
+        else
+            Lighting.GlobalShadows = true
+        end
+    end)
+end
+
+local function setRemoveParticles(state)
+    pcall(function()
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Smoke") or obj:IsA("Fire") then
+                obj.Enabled = not state
+            end
+        end
+    end)
+end
+
+local function setForceSunny(state)
+    pcall(function()
+        local weather = workspace:FindFirstChild("Weather")
+        if weather and weather:IsA("StringValue") and state then
+            weather.Value = "Sunny"
+        end
+    end)
 end
 
 local OriginalNamecallTP
@@ -266,6 +334,7 @@ local autofarmEnabled = false
 local noclipEnabled = false
 local cameraNoclipEnabled = false
 local randomTPEnabled = true
+local autoStealEnabled = true
 local lockConnection = nil
 local lockedPosition = nil
 local farmCoroutine = nil
@@ -321,6 +390,9 @@ local infoConnection = nil
 local infoLabel = nil
 
 local autoStealThread = nil
+
+local lastTPTime = 0
+local TPCooldownValue = Config.TPCooldown or 0.15
 
 local function countItem(name)
     local count = 0
@@ -416,7 +488,7 @@ local function getAllItems()
     for _, item in ipairs(folder:GetChildren()) do
         if isItemAvailable(item) then
             local name = getItemName(item)
-            if not isItemFull(name) then
+            if CollectItems[name] ~= false and not isItemFull(name) then
                 local pos = getItemPosition(item)
                 if pos then table.insert(items, {item = item, pos = pos, name = name}) end
             end
@@ -426,6 +498,12 @@ local function getAllItems()
 end
 
 local function lockToPosition(position)
+    local now = tick()
+    local elapsed = now - lastTPTime
+    if elapsed < TPCooldownValue then
+        task.wait(TPCooldownValue - elapsed)
+    end
+    lastTPTime = tick()
     totalTPs = totalTPs + 1
     lockedPosition = Vector3.new(position.X, position.Y - Config.TPOffset, position.Z)
     if lockConnection then lockConnection:Disconnect() end
@@ -485,40 +563,71 @@ local function disableNoclip()
     end
 end
 
+local cameraNoclipActive = false
+local cameraNoclipBackup = nil
+local cameraNoclipConn = nil
+
 local function enableCameraNoclip()
-    pcall(function()
-        local PopperClient = LocalPlayer:WaitForChild("PlayerScripts").PlayerModule.CameraModule.ZoomController.Popper
-        for i, v in next, getgc() do
-            if getfenv(v).script == PopperClient and typeof(v) == "function" then
-                for i2, v2 in next, debug.getconstants(v) do
-                    if tonumber(v2) == 0.25 then
-                        debug.setconstant(v, i2, 0)
-                    elseif tonumber(v2) == 0 then
-                        debug.setconstant(v, i2, 0.25)
+    if cameraNoclipActive then return end
+    cameraNoclipActive = true
+    cameraNoclipBackup = {}
+
+    local function apply()
+        pcall(function()
+            for _, obj in ipairs(workspace:GetDescendants()) do
+                if obj:IsA("BasePart") then
+                    if cameraNoclipBackup[obj] == nil then
+                        cameraNoclipBackup[obj] = obj.LocalTransparencyModifier
                     end
+                    obj.LocalTransparencyModifier = 1
                 end
+            end
+        end)
+    end
+
+    apply()
+    if cameraNoclipConn then cameraNoclipConn:Disconnect() end
+    cameraNoclipConn = workspace.DescendantAdded:Connect(function(obj)
+        if cameraNoclipActive and obj:IsA("BasePart") then
+            task.wait()
+            if cameraNoclipActive and obj.Parent then
+                if cameraNoclipBackup[obj] == nil then
+                    cameraNoclipBackup[obj] = obj.LocalTransparencyModifier
+                end
+                obj.LocalTransparencyModifier = 1
             end
         end
     end)
-    _G.VoidYBAFarmCameraNoclip = true
+
+    pcall(function()
+        local cam = workspace.CurrentCamera
+        if cam then
+            cam.CanCollide = false
+        end
+    end)
 end
 
 local function disableCameraNoclip()
+    if not cameraNoclipActive then return end
+    cameraNoclipActive = false
+    if cameraNoclipConn then
+        cameraNoclipConn:Disconnect()
+        cameraNoclipConn = nil
+    end
     pcall(function()
-        local PopperClient = LocalPlayer:WaitForChild("PlayerScripts").PlayerModule.CameraModule.ZoomController.Popper
-        for i, v in next, getgc() do
-            if getfenv(v).script == PopperClient and typeof(v) == "function" then
-                for i2, v2 in next, debug.getconstants(v) do
-                    if tonumber(v2) == 0 then
-                        debug.setconstant(v, i2, 0.25)
-                    elseif tonumber(v2) == 0.25 then
-                        debug.setconstant(v, i2, 0)
-                    end
-                end
+        for obj, orig in pairs(cameraNoclipBackup or {}) do
+            if obj and obj.Parent then
+                pcall(function() obj.LocalTransparencyModifier = orig or 0 end)
             end
         end
     end)
-    _G.VoidYBAFarmCameraNoclip = false
+    cameraNoclipBackup = nil
+    pcall(function()
+        local cam = workspace.CurrentCamera
+        if cam then
+            cam.CanCollide = true
+        end
+    end)
 end
 
 local function setCameraNoclip(state)
@@ -733,6 +842,7 @@ local function enableAnim()
         animTrack:Play()
         animTrack.TimePosition = ANIM_START_TIME
     end)
+    if not animTrack then return end
     if animConnection then animConnection:Disconnect() end
     animConnection = animTrack.Stopped:Connect(function()
         if not autofarmEnabled then return end
@@ -1090,22 +1200,24 @@ end
 local function autoStealLoop()
     while true do
         task.wait(0.05)
-        pcall(function()
-            local char = LocalPlayer.Character
-            if not char then return end
-            local hrp = char:FindFirstChild("HumanoidRootPart")
-            if not hrp then return end
+        if autoStealEnabled then
+            pcall(function()
+                local char = LocalPlayer.Character
+                if not char then return end
+                local hrp = char:FindFirstChild("HumanoidRootPart")
+                if not hrp then return end
 
-            for _, plr in ipairs(Players:GetPlayers()) do
-                if plr ~= LocalPlayer and plr.Character then
-                    local money = plr.Character:FindFirstChild("Money")
-                    if money and money:IsA("BasePart") then
-                        firetouchinterest(hrp, money, 0)
-                        firetouchinterest(hrp, money, 1)
+                for _, plr in ipairs(Players:GetPlayers()) do
+                    if plr ~= LocalPlayer and plr.Character then
+                        local money = plr.Character:FindFirstChild("Money")
+                        if money and money:IsA("BasePart") then
+                            firetouchinterest(hrp, money, 0)
+                            firetouchinterest(hrp, money, 1)
+                        end
                     end
                 end
-            end
-        end)
+            end)
+        end
     end
 end
 
@@ -1151,91 +1263,140 @@ if not ScreenGui.Parent then ScreenGui.Parent = LocalPlayer:WaitForChild("Player
 _G.VoidYBAFarm.gui = ScreenGui
 
 local Main = Instance.new("Frame")
-Main.Size = UDim2.new(0, 480, 0, 436)
-Main.Position = UDim2.new(0.5, -240, 0.5, -218)
-Main.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+Main.Size = UDim2.new(0, 460, 0, 470)
+Main.Position = UDim2.new(0.5, -230, 0.5, -235)
+Main.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
 Main.BorderSizePixel = 0
 Main.Active = true
 Main.Draggable = true
 Main.Parent = ScreenGui
 
 local UICorner = Instance.new("UICorner")
-UICorner.CornerRadius = UDim.new(0, 8)
+UICorner.CornerRadius = UDim.new(0, 10)
 UICorner.Parent = Main
 
+local UIStroke = Instance.new("UIStroke")
+UIStroke.Color = Color3.fromRGB(180, 40, 40)
+UIStroke.Thickness = 1
+UIStroke.Transparency = 0.6
+UIStroke.Parent = Main
+
 local TopBar = Instance.new("Frame")
-TopBar.Size = UDim2.new(1, 0, 0, 32)
-TopBar.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
+TopBar.Size = UDim2.new(1, 0, 0, 34)
+TopBar.BackgroundColor3 = Color3.fromRGB(24, 24, 30)
 TopBar.BorderSizePixel = 0
 TopBar.Parent = Main
 
 local TopCorner = Instance.new("UICorner")
-TopCorner.CornerRadius = UDim.new(0, 8)
+TopCorner.CornerRadius = UDim.new(0, 10)
 TopCorner.Parent = TopBar
 
+local TopBarMask = Instance.new("Frame")
+TopBarMask.Size = UDim2.new(1, 0, 0, 10)
+TopBarMask.Position = UDim2.new(0, 0, 1, -10)
+TopBarMask.BackgroundColor3 = Color3.fromRGB(24, 24, 30)
+TopBarMask.BorderSizePixel = 0
+TopBarMask.Parent = TopBar
+
 local Title = Instance.new("TextLabel")
-Title.Size = UDim2.new(1, -80, 1, 0)
-Title.Position = UDim2.new(0, 10, 0, 0)
+Title.Size = UDim2.new(1, -100, 1, 0)
+Title.Position = UDim2.new(0, 12, 0, 0)
 Title.BackgroundTransparency = 1
-Title.Text = "VOID | YBA FARM"
-Title.TextColor3 = Color3.fromRGB(220, 50, 50)
+Title.Text = "Void Autofarm"
+Title.TextColor3 = Color3.fromRGB(230, 60, 60)
 Title.Font = Enum.Font.GothamBold
 Title.TextSize = 14
 Title.TextXAlignment = Enum.TextXAlignment.Left
 Title.Parent = TopBar
 
+local clockConnection = nil
+local function updateTitleClock()
+    if not Title then return end
+    if Config.ShowClock then
+        local t = os.date("*t")
+        local clock = string.format("%02d:%02d:%02d", t.hour, t.min, t.sec)
+        Title.Text = "Void Autofarm | " .. clock
+    else
+        Title.Text = "Void Autofarm"
+    end
+end
+
+updateTitleClock()
+clockConnection = task.spawn(function()
+    while Title and Title.Parent do
+        updateTitleClock()
+        task.wait(1)
+    end
+end)
+table.insert(_G.VoidYBAFarm.threads, clockConnection)
+
 local CloseBtn = Instance.new("TextButton")
-CloseBtn.Size = UDim2.new(0, 28, 0, 24)
-CloseBtn.Position = UDim2.new(1, -34, 0, 4)
+CloseBtn.Size = UDim2.new(0, 26, 0, 22)
+CloseBtn.Position = UDim2.new(1, -32, 0, 6)
 CloseBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
 CloseBtn.BorderSizePixel = 0
 CloseBtn.Text = "X"
 CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
 CloseBtn.Font = Enum.Font.GothamBold
-CloseBtn.TextSize = 14
+CloseBtn.TextSize = 13
 CloseBtn.Parent = TopBar
 local CC = Instance.new("UICorner") CC.CornerRadius = UDim.new(0, 6) CC.Parent = CloseBtn
 
 local MinimizeBtn = Instance.new("TextButton")
-MinimizeBtn.Size = UDim2.new(0, 28, 0, 24)
-MinimizeBtn.Position = UDim2.new(1, -66, 0, 4)
-MinimizeBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+MinimizeBtn.Size = UDim2.new(0, 26, 0, 22)
+MinimizeBtn.Position = UDim2.new(1, -62, 0, 6)
+MinimizeBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
 MinimizeBtn.BorderSizePixel = 0
 MinimizeBtn.Text = "-"
 MinimizeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
 MinimizeBtn.Font = Enum.Font.GothamBold
-MinimizeBtn.TextSize = 16
+MinimizeBtn.TextSize = 15
 MinimizeBtn.Parent = TopBar
 local MC = Instance.new("UICorner") MC.CornerRadius = UDim.new(0, 6) MC.Parent = MinimizeBtn
 
 local TabBar = Instance.new("Frame")
-TabBar.Size = UDim2.new(0, 120, 1, -40)
-TabBar.Position = UDim2.new(0, 8, 0, 36)
-TabBar.BackgroundColor3 = Color3.fromRGB(25, 25, 32)
+TabBar.Size = UDim2.new(0, 120, 1, -46)
+TabBar.Position = UDim2.new(0, 8, 0, 42)
+TabBar.BackgroundColor3 = Color3.fromRGB(24, 24, 30)
 TabBar.BorderSizePixel = 0
 TabBar.Parent = Main
-local TBC = Instance.new("UICorner") TBC.CornerRadius = UDim.new(0, 6) TBC.Parent = TabBar
+local TBC = Instance.new("UICorner") TBC.CornerRadius = UDim.new(0, 8) TBC.Parent = TabBar
 
 local Content = Instance.new("Frame")
-Content.Size = UDim2.new(1, -144, 1, -44)
-Content.Position = UDim2.new(0, 136, 0, 40)
-Content.BackgroundColor3 = Color3.fromRGB(25, 25, 32)
+Content.Size = UDim2.new(1, -144, 1, -50)
+Content.Position = UDim2.new(0, 136, 0, 42)
+Content.BackgroundColor3 = Color3.fromRGB(24, 24, 30)
 Content.BorderSizePixel = 0
 Content.Parent = Main
-local CNC = Instance.new("UICorner") CNC.CornerRadius = UDim.new(0, 6) CNC.Parent = Content
+local CNC = Instance.new("UICorner") CNC.CornerRadius = UDim.new(0, 8) CNC.Parent = Content
 
 local function makeTabButton(name, order)
     local btn = Instance.new("TextButton")
     btn.Size = UDim2.new(1, -8, 0, 30)
-    btn.Position = UDim2.new(0, 4, 0, 4 + (order * 34))
-    btn.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+    btn.Position = UDim2.new(0, 4, 0, 4 + (order * 32))
+    btn.BackgroundColor3 = Color3.fromRGB(32, 32, 40)
+    btn.BackgroundTransparency = 0.3
     btn.BorderSizePixel = 0
-    btn.Text = name
+    btn.Text = "  " .. name
     btn.TextColor3 = Color3.fromRGB(200, 200, 210)
     btn.Font = Enum.Font.Gotham
-    btn.TextSize = 13
+    btn.TextSize = 12
+    btn.TextXAlignment = Enum.TextXAlignment.Left
     btn.Parent = TabBar
-    local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 5) c.Parent = btn
+    local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 6) c.Parent = btn
+
+    btn.MouseEnter:Connect(function()
+        if not btn:GetAttribute("Active") then
+            btn.BackgroundColor3 = Color3.fromRGB(45, 45, 58)
+            btn.BackgroundTransparency = 0
+        end
+    end)
+    btn.MouseLeave:Connect(function()
+        if not btn:GetAttribute("Active") then
+            btn.BackgroundColor3 = Color3.fromRGB(32, 32, 40)
+            btn.BackgroundTransparency = 0.3
+        end
+    end)
     return btn
 end
 
@@ -1311,13 +1472,19 @@ local function makeToggleScrolling(parent, text, default, callback)
     local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 5) c.Parent = btn
 
     local state = default
-    btn.MouseButton1Click:Connect(function()
-        state = not state
+    local api = {}
+    api.holder = holder
+    api.set = function(v)
+        state = v
         btn.Text = state and "ON" or "OFF"
         btn.BackgroundColor3 = state and Color3.fromRGB(60, 180, 90) or Color3.fromRGB(80, 80, 90)
         if callback then callback(state) end
+    end
+
+    btn.MouseButton1Click:Connect(function()
+        api.set(not state)
     end)
-    return holder
+    return api
 end
 
 local function makeToggle(parent, text, yPos, default, callback)
@@ -1417,17 +1584,20 @@ local function makeSlider(parent, text, yPos, min, max, default, callback)
             dragging = true
         end
     end)
-    UserInputService.InputEnded:Connect(function(input)
+    local endConn = UserInputService.InputEnded:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             dragging = false
         end
     end)
-    UserInputService.InputChanged:Connect(function(input)
+    local changeConn = UserInputService.InputChanged:Connect(function(input)
         if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
             local rel = (input.Position.X - bar.AbsolutePosition.X) / bar.AbsoluteSize.X
             setValue(min + rel * (max - min))
         end
     end)
+    table.insert(_G.VoidYBAFarm.connections, endConn)
+    table.insert(_G.VoidYBAFarm.connections, changeConn)
+
     valBox.FocusLost:Connect(function()
         local n = tonumber(valBox.Text)
         if n then setValue(n) else valBox.Text = tostring(default) end
@@ -1445,7 +1615,7 @@ local function makeButton(parent, text, yPos, callback, color)
     btn.Font = Enum.Font.Gotham
     btn.TextSize = 13
     btn.Parent = parent
-    local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 5) c.Parent = btn
+    local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 6) c.Parent = btn
     btn.MouseButton1Click:Connect(callback)
     return btn
 end
@@ -1454,6 +1624,7 @@ local FarmPage = makePage("Farm")
 local InfoPage = makePage("Info")
 local OptPage = makePage("Opt")
 local SellPageHolder, SellScroll = makeScrollingPage("Sell")
+local CollectPageHolder, CollectScroll = makeScrollingPage("Collect")
 
 makeToggle(FarmPage, "Autofarm", 8, false, function(state)
     if state then startAutofarm() else stopAutofarm() end
@@ -1481,33 +1652,35 @@ makeToggle(FarmPage, "Random TP", 168, true, function(state)
     setRandomTP(state)
 end)
 
-makeToggle(FarmPage, "Server Hop (5 min)", 200, false, function(state)
+makeToggle(FarmPage, "Auto Steal", 200, true, function(state)
+    autoStealEnabled = state
+end)
+
+makeToggle(FarmPage, "Server Hop (5 min)", 232, false, function(state)
     Config.ServerHop = state
     saveConfig()
     if state then startServerHop() end
 end)
 
-makeSlider(FarmPage, "TP Offset", 240, 0, 40, Config.TPOffset, function(v)
+makeSlider(FarmPage, "TP Cooldown (s)", 272, 0, 1, Config.TPCooldown or 0.15, function(v)
+    TPCooldownValue = v
+    Config.TPCooldown = v
+    saveConfig()
+end)
+
+makeSlider(FarmPage, "TP Offset", 314, 0, 40, Config.TPOffset, function(v)
     Config.TPOffset = v
     saveConfig()
 end)
 
-makeSlider(FarmPage, "TP Speed (s)", 282, 0.8, 1.2, Config.TPSpeed, function(v)
+makeSlider(FarmPage, "TP Speed (s)", 356, 0.8, 1.2, Config.TPSpeed, function(v)
     Config.TPSpeed = math.floor(v * 100) / 100
     saveConfig()
 end)
 
-makeButton(FarmPage, "TP TO MERCHANT", 336, function()
+makeButton(FarmPage, "TP TO MERCHANT", 408, function()
     tpToMerchant()
 end, Color3.fromRGB(40, 90, 200))
-
-makeButton(FarmPage, "Set Sunny Weather", 370, function()
-    setWeather("Sunny")
-end, Color3.fromRGB(230, 180, 40))
-
-makeButton(FarmPage, "Save Config", 404, function()
-    saveConfig()
-end)
 
 local infoHeader = Instance.new("TextLabel")
 infoHeader.Size = UDim2.new(1, -8, 0, 24)
@@ -1597,21 +1770,73 @@ niggaLabel.TextSize = 13
 niggaLabel.TextXAlignment = Enum.TextXAlignment.Left
 niggaLabel.Parent = creditsHolder
 
-makeSlider(OptPage, "FPS Cap", 8, 30, 240, Config.FPSCap, function(v)
+local optHeader = Instance.new("TextLabel")
+optHeader.Size = UDim2.new(1, -8, 0, 24)
+optHeader.BackgroundTransparency = 1
+optHeader.Text = "⚙ OPTIMIZATION"
+optHeader.TextColor3 = Color3.fromRGB(220, 50, 50)
+optHeader.Font = Enum.Font.GothamBold
+optHeader.TextSize = 13
+optHeader.TextXAlignment = Enum.TextXAlignment.Left
+optHeader.Parent = OptPage
+
+makeToggle(OptPage, "Show Clock in Title", 32, Config.ShowClock, function(state)
+    Config.ShowClock = state
+    saveConfig()
+    updateTitleClock()
+end)
+
+makeSlider(OptPage, "FPS Cap", 72, 30, 240, Config.FPSCap, function(v)
     Config.FPSCap = v
     applyFPSCap(v)
+    saveConfig()
 end)
 
-makeSlider(OptPage, "Render Distance", 56, 1, 20, Config.RenderDistance, function(v)
+makeSlider(OptPage, "Render Distance", 120, 1, 20, Config.RenderDistance, function(v)
     Config.RenderDistance = v
     applyRenderDistance(v)
+    saveConfig()
 end)
 
-makeToggle(OptPage, "Remove Trees/Bushes", 104, Config.RemoveTrees, function(state)
+makeToggle(OptPage, "Remove Trees/Bushes", 168, Config.RemoveTrees, function(state)
     Config.RemoveTrees = state
     if state then removeTreesAndBushes() end
     saveConfig()
 end)
+
+makeToggle(OptPage, "Low Graphics", 200, Config.OptLowGraphics, function(state)
+    Config.OptLowGraphics = state
+    setLowGraphics(state)
+    saveConfig()
+end)
+
+makeToggle(OptPage, "Disable Shadows/Effects", 232, Config.OptDisableShadows, function(state)
+    Config.OptDisableShadows = state
+    setDisableShadows(state)
+    saveConfig()
+end)
+
+makeToggle(OptPage, "Remove Particles", 264, Config.OptRemoveParticles, function(state)
+    Config.OptRemoveParticles = state
+    setRemoveParticles(state)
+    saveConfig()
+end)
+
+makeToggle(OptPage, "Force Sunny Weather", 296, Config.OptRemoveWeather, function(state)
+    Config.OptRemoveWeather = state
+    setForceSunny(state)
+    saveConfig()
+end)
+
+makeButton(OptPage, "Apply All Optimizations", 336, function()
+    applyFPSCap(Config.FPSCap)
+    applyRenderDistance(Config.RenderDistance)
+    if Config.RemoveTrees then removeTreesAndBushes() end
+    setLowGraphics(Config.OptLowGraphics)
+    setDisableShadows(Config.OptDisableShadows)
+    setRemoveParticles(Config.OptRemoveParticles)
+    setForceSunny(Config.OptRemoveWeather)
+end, Color3.fromRGB(40, 90, 200))
 
 local sellHeader = Instance.new("TextLabel")
 sellHeader.Size = UDim2.new(1, -8, 0, 24)
@@ -1632,16 +1857,6 @@ makeToggleScrolling(SellScroll, "Auto Sell Loop", Config.AutoSell, function(stat
         stopAutoSell()
     end
 end)
-
-local sellStatusLabel = Instance.new("TextLabel")
-sellStatusLabel.Size = UDim2.new(1, -8, 0, 20)
-sellStatusLabel.BackgroundTransparency = 1
-sellStatusLabel.Text = ""
-sellStatusLabel.TextColor3 = Color3.fromRGB(180, 180, 190)
-sellStatusLabel.Font = Enum.Font.Gotham
-sellStatusLabel.TextSize = 11
-sellStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
-sellStatusLabel.Parent = SellScroll
 
 local webhookHeader = Instance.new("TextLabel")
 webhookHeader.Size = UDim2.new(1, -8, 0, 24)
@@ -1736,26 +1951,113 @@ for _, itemName in ipairs(SELL_ITEMS_DEFAULT) do
     end)
 end
 
-local currentTab = nil
+local collectHeader = Instance.new("TextLabel")
+collectHeader.Size = UDim2.new(1, -8, 0, 24)
+collectHeader.BackgroundTransparency = 1
+collectHeader.Text = "⚙ ITEMS TO COLLECT"
+collectHeader.TextColor3 = Color3.fromRGB(220, 50, 50)
+collectHeader.Font = Enum.Font.GothamBold
+collectHeader.TextSize = 13
+collectHeader.TextXAlignment = Enum.TextXAlignment.Left
+collectHeader.Parent = CollectScroll
+
+local allBtnHolder = Instance.new("Frame")
+allBtnHolder.Size = UDim2.new(1, -8, 0, 26)
+allBtnHolder.BackgroundTransparency = 1
+allBtnHolder.Parent = CollectScroll
+
+local toggleAllBtn = Instance.new("TextButton")
+toggleAllBtn.Size = UDim2.new(0.49, -2, 1, 0)
+toggleAllBtn.Position = UDim2.new(0, 0, 0, 0)
+toggleAllBtn.BackgroundColor3 = Color3.fromRGB(60, 180, 90)
+toggleAllBtn.BorderSizePixel = 0
+toggleAllBtn.Text = "ALL ON"
+toggleAllBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+toggleAllBtn.Font = Enum.Font.GothamBold
+toggleAllBtn.TextSize = 11
+toggleAllBtn.Parent = allBtnHolder
+local tabc = Instance.new("UICorner") tabc.CornerRadius = UDim.new(0, 4) tabc.Parent = toggleAllBtn
+
+local toggleNoneBtn = Instance.new("TextButton")
+toggleNoneBtn.Size = UDim2.new(0.49, -2, 1, 0)
+toggleNoneBtn.Position = UDim2.new(0.51, 0, 0, 0)
+toggleNoneBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
+toggleNoneBtn.BorderSizePixel = 0
+toggleNoneBtn.Text = "ALL OFF"
+toggleNoneBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+toggleNoneBtn.Font = Enum.Font.GothamBold
+toggleNoneBtn.TextSize = 11
+toggleNoneBtn.Parent = allBtnHolder
+local tnbc = Instance.new("UICorner") tnbc.CornerRadius = UDim.new(0, 4) tnbc.Parent = toggleNoneBtn
+
+local collectToggles = {}
+
+for _, itemName in ipairs(SELL_ITEMS_DEFAULT) do
+    local t = makeToggleScrolling(CollectScroll, itemName, CollectItems[itemName] ~= false, function(state)
+        CollectItems[itemName] = state
+        saveConfig()
+    end)
+    table.insert(collectToggles, t)
+end
+
+toggleAllBtn.MouseButton1Click:Connect(function()
+    for _, itemName in ipairs(SELL_ITEMS_DEFAULT) do
+        CollectItems[itemName] = true
+    end
+    saveConfig()
+    for _, t in ipairs(collectToggles) do t.set(true) end
+end)
+
+toggleNoneBtn.MouseButton1Click:Connect(function()
+    for _, itemName in ipairs(SELL_ITEMS_DEFAULT) do
+        CollectItems[itemName] = false
+    end
+    saveConfig()
+    for _, t in ipairs(collectToggles) do t.set(false) end
+end)
+
+local TAB_BUTTONS = {}
 local function switchTab(name)
     FarmPage.Visible = false
+    CollectPageHolder.Visible = false
     InfoPage.Visible = false
     OptPage.Visible = false
     SellPageHolder.Visible = false
+    for _, b in pairs(TAB_BUTTONS) do
+        b:SetAttribute("Active", false)
+        b.BackgroundColor3 = Color3.fromRGB(32, 32, 40)
+        b.BackgroundTransparency = 0.3
+    end
     if name == "Farm" then FarmPage.Visible = true
+    elseif name == "Collect" then CollectPageHolder.Visible = true
     elseif name == "Info" then InfoPage.Visible = true
     elseif name == "Opt" then OptPage.Visible = true
     elseif name == "Sell" then SellPageHolder.Visible = true end
+    local active = TAB_BUTTONS[name]
+    if active then
+        active:SetAttribute("Active", true)
+        active.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
+        active.BackgroundTransparency = 0
+    end
     currentTab = name
 end
 
 local FarmTabBtn = makeTabButton("Autofarm", 0)
-local InfoTabBtn = makeTabButton("Info", 1)
-local OptTabBtn = makeTabButton("Optimization", 2)
-local SellTabBtn = makeTabButton("Auto Sell", 3)
+local CollectTabBtn = makeTabButton("Collect", 1)
+local InfoTabBtn = makeTabButton("Info", 2)
+local OptTabBtn = makeTabButton("Optimization", 3)
+local SellTabBtn = makeTabButton("Auto Sell", 4)
+
+TAB_BUTTONS["Farm"] = FarmTabBtn
+TAB_BUTTONS["Collect"] = CollectTabBtn
+TAB_BUTTONS["Info"] = InfoTabBtn
+TAB_BUTTONS["Opt"] = OptTabBtn
+TAB_BUTTONS["Sell"] = SellTabBtn
+
 switchTab("Farm")
 
 FarmTabBtn.MouseButton1Click:Connect(function() switchTab("Farm") end)
+CollectTabBtn.MouseButton1Click:Connect(function() switchTab("Collect") end)
 InfoTabBtn.MouseButton1Click:Connect(function() switchTab("Info") end)
 OptTabBtn.MouseButton1Click:Connect(function() switchTab("Opt") end)
 SellTabBtn.MouseButton1Click:Connect(function() switchTab("Sell") end)
@@ -1766,11 +2068,11 @@ MinimizeBtn.MouseButton1Click:Connect(function()
     if minimized then
         Content.Visible = false
         TabBar.Visible = false
-        Main.Size = UDim2.new(0, 480, 0, 32)
+        Main.Size = UDim2.new(0, 460, 0, 34)
     else
         Content.Visible = true
         TabBar.Visible = true
-        Main.Size = UDim2.new(0, 480, 0, 436)
+        Main.Size = UDim2.new(0, 460, 0, 470)
     end
 end)
 
@@ -1810,6 +2112,11 @@ end
 setNoclip(true)
 setWeather(WEATHER_VALUE)
 
+if Config.OptLowGraphics then setLowGraphics(true) end
+if Config.OptDisableShadows then setDisableShadows(true) end
+if Config.OptRemoveParticles then setRemoveParticles(true) end
+if Config.OptRemoveWeather then setForceSunny(true) end
+
 if Config.InfoEnabled then
     infoEnabled = true
     infoConnection = RunService.Heartbeat:Connect(function()
@@ -1846,6 +2153,11 @@ _G.VoidYBAFarm.cleanup = function()
     end
     _G.VoidYBAFarm.connections = {}
 
+    for _, th in ipairs(_G.VoidYBAFarm.threads) do
+        pcall(function() task.cancel(th) end)
+    end
+    _G.VoidYBAFarm.threads = {}
+
     if lockConnection then pcall(function() lockConnection:Disconnect() end) end
     if cameraLockConnection then pcall(function() cameraLockConnection:Disconnect() end) end
     if mouseInputConn then pcall(function() mouseInputConn:Disconnect() end) end
@@ -1858,8 +2170,12 @@ _G.VoidYBAFarm.cleanup = function()
     if autoSellLoopThread then pcall(function() task.cancel(autoSellLoopThread) end) end
     if autoStealThread then pcall(function() task.cancel(autoStealThread) end) end
 
-    if cameraNoclipEnabled then pcall(disableCameraNoclip) end
+    if cameraNoclipActive then pcall(disableCameraNoclip) end
     if threeDDisabled then pcall(disable3DOff) end
+
+    if Config.OptLowGraphics then pcall(function() setLowGraphics(false) end) end
+    if Config.OptDisableShadows then pcall(function() setDisableShadows(false) end) end
+    if Config.OptRemoveParticles then pcall(function() setRemoveParticles(false) end) end
 
     cameraLockConnection = nil
     mouseInputConn = nil
