@@ -11,6 +11,8 @@ local MarketplaceService = game:GetService("MarketplaceService")
 
 local LocalPlayer = Players.LocalPlayer
 
+local no3DKeyConnection = nil
+
 local START_FARM_SCRIPT
 local scriptStarted = false
 
@@ -408,6 +410,9 @@ local autoStealThread = nil
 
 local lastTPTime = 0
 local TPCooldownValue = Config.TPCooldown or 0.15
+
+local autoBuyEnabled = false
+local autoBuyThread = nil
 
 local function countItem(name)
     local count = 0
@@ -899,15 +904,31 @@ local function enable3DOff()
     local hopsLbl = createStatCell(7, "Hops", "0")
     local pingLbl = createStatCell(8, "Ping", "0 ms", Color3.fromRGB(255, 200, 0))
 
+    local hintLbl = Instance.new("TextLabel")
+    hintLbl.Size = UDim2.new(1, 0, 0, 24)
+    hintLbl.Position = UDim2.new(0, 0, 1, -40)
+    hintLbl.BackgroundTransparency = 1
+    hintLbl.Text = "PRESS L TO CANCEL \"No 3D\""
+    hintLbl.TextColor3 = Color3.fromRGB(150, 150, 150)
+    hintLbl.Font = Enum.Font.Code
+    hintLbl.TextSize = 16
+    hintLbl.ZIndex = 2
+    hintLbl.Parent = bg
+
     local startBalance = 0
-    task.spawn(function()
+    local function getMoney()
+        local m = 0
         pcall(function()
-            local ls = LocalPlayer:WaitForChild("leaderstats", 10)
-            if ls then
-                local cash = ls:FindFirstChild("Cash") or ls:FindFirstChild("Money") or ls:FindFirstChild("Balance")
-                if cash then startBalance = cash.Value end
+            local stats = LocalPlayer:FindFirstChild("PlayerStats")
+            if stats and stats:FindFirstChild("Money") then
+                m = tonumber(stats.Money.Value) or 0
             end
         end)
+        return m
+    end
+    task.spawn(function()
+        task.wait(1)
+        startBalance = getMoney()
     end)
 
     threeDOverlay = gui
@@ -928,13 +949,7 @@ local function enable3DOff()
             task.wait(0.5)
             if not threeDOverlay then break end
             pcall(function()
-                local ls = LocalPlayer:FindFirstChild("leaderstats")
-                local cashVal = 0
-                if ls then
-                    local cash = ls:FindFirstChild("Cash") or ls:FindFirstChild("Money") or ls:FindFirstChild("Balance")
-                    if cash then cashVal = cash.Value end
-                end
-
+                local cashVal = getMoney()
                 if startBalance == 0 then startBalance = cashVal end
                 local earnedVal = math.max(0, cashVal - startBalance)
                 earned.Text = "+$" .. formatNumber(earnedVal)
@@ -976,6 +991,20 @@ local function enable3DOff()
                 end
                 pingLbl.Text = string.format("%d ms", ping)
             end)
+        end
+    end)
+
+    if no3DKeyConnection then
+        no3DKeyConnection:Disconnect()
+        no3DKeyConnection = nil
+    end
+    
+    no3DKeyConnection = UserInputService.InputBegan:Connect(function(input, gpe)
+        if gpe then return end
+        if input.KeyCode == Enum.KeyCode.L then
+            if threeDDisabled then
+                disable3DOff()
+            end
         end
     end)
 end
@@ -1106,6 +1135,79 @@ local function stopHPMonitor()
         hpMonitorThread = nil
     end
     lastHP = 1
+end
+
+local function getLuckyArrowCount()
+    local count = 0
+    if LocalPlayer.Backpack then
+        for _, tool in ipairs(LocalPlayer.Backpack:GetChildren()) do
+            if tool.Name == "Lucky Arrow" then count = count + 1 end
+        end
+    end
+    if LocalPlayer.Character then
+        for _, obj in ipairs(LocalPlayer.Character:GetChildren()) do
+            if obj:IsA("Tool") and obj.Name == "Lucky Arrow" then count = count + 1 end
+        end
+    end
+    return count
+end
+
+local function getPlayerMoney()
+    local m = 0
+    pcall(function()
+        local stats = LocalPlayer:FindFirstChild("PlayerStats")
+        if stats and stats:FindFirstChild("Money") then
+            m = tonumber(stats.Money.Value) or 0
+        end
+    end)
+    return m
+end
+
+local function tryBuyLuckyArrow()
+    if getPlayerMoney() < 75000 then return false end
+    local maxLucky = has2xInventory and 19 or 9
+    if getLuckyArrowCount() >= maxLucky then return false end
+
+    local btn
+    pcall(function()
+        btn = LocalPlayer.PlayerGui.HUD.Main.Frames.Store.List.ItemShop.List["1x Lucky Arrow"]
+    end)
+    if not btn then return false end
+
+    pcall(function()
+        if firesignal then
+            firesignal(btn.MouseButton1Click)
+        elseif getconnections then
+            for _, c in ipairs(getconnections(btn.MouseButton1Click)) do
+                if c.Function then c.Function() else c:Fire() end
+            end
+        end
+        if btn.Activated then btn:Activated() end
+    end)
+    return true
+end
+
+local function autoBuyLoop()
+    while autoBuyEnabled do
+        task.wait(1)
+        if autoBuyEnabled then
+            tryBuyLuckyArrow()
+        end
+    end
+end
+
+local function startAutoBuy()
+    if autoBuyThread then return end
+    autoBuyEnabled = true
+    autoBuyThread = task.spawn(autoBuyLoop)
+end
+
+local function stopAutoBuy()
+    autoBuyEnabled = false
+    if autoBuyThread then
+        pcall(function() task.cancel(autoBuyThread) end)
+        autoBuyThread = nil
+    end
 end
 
 local function autofarmLoop()
@@ -1461,7 +1563,7 @@ local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "VoidYBAFarm"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-ScreenGui.DisplayOrder = 10
+ScreenGui.DisplayOrder = 9999
 pcall(function() ScreenGui.Parent = CoreGui end)
 if not ScreenGui.Parent then ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
 
@@ -1843,7 +1945,7 @@ makeToggle(FarmPage, "Camera Noclip", 72, false, function(state)
     setCameraNoclip(state)
 end)
 
-makeToggle(FarmPage, "3D OFF (Black Screen)", 104, false, function(state)
+makeToggle(FarmPage, "3D OFF (🔴 RECOMENDED FOR AFK AUTOFARM 🔴)", 104, false, function(state)
     set3DOff(state)
 end)
 
@@ -1857,35 +1959,35 @@ makeToggle(FarmPage, "Random TP", 168, true, function(state)
     setRandomTP(state)
 end)
 
-makeToggle(FarmPage, "Auto Steal", 200, true, function(state)
+makeToggle(FarmPage, "Auto Steal Money", 200, true, function(state)
     autoStealEnabled = state
 end)
 
-makeToggle(FarmPage, "Server Hop (5 min)", 232, false, function(state)
+makeToggle(FarmPage, "Auto Buy Lucky Arrow", 232, false, function(state)
+    if state then startAutoBuy() else stopAutoBuy() end
+end)
+
+makeToggle(FarmPage, "Server Hop (5 min)", 264, false, function(state)
     Config.ServerHop = state
     saveConfig()
     if state then startServerHop() end
 end)
 
-makeSlider(FarmPage, "TP Cooldown (s)", 272, 0, 1, Config.TPCooldown or 0.15, function(v)
+makeSlider(FarmPage, "TP Cooldown (s)", 304, 0, 1, Config.TPCooldown or 0.15, function(v)
     TPCooldownValue = v
     Config.TPCooldown = v
     saveConfig()
 end)
 
-makeSlider(FarmPage, "TP Offset", 314, 0, 40, Config.TPOffset, function(v)
+makeSlider(FarmPage, "TP Offset", 346, 0, 40, Config.TPOffset, function(v)
     Config.TPOffset = v
     saveConfig()
 end)
 
-makeSlider(FarmPage, "TP Speed (s)", 356, 0.8, 1.2, Config.TPSpeed, function(v)
+makeSlider(FarmPage, "TP Speed (s)", 388, 0.8, 1.2, Config.TPSpeed, function(v)
     Config.TPSpeed = math.floor(v * 100) / 100
     saveConfig()
 end)
-
-makeButton(FarmPage, "TP TO MERCHANT", 408, function()
-    tpToMerchant()
-end, Color3.fromRGB(40, 90, 200))
 
 local infoHeader = Instance.new("TextLabel")
 infoHeader.Size = UDim2.new(1, -8, 0, 24)
@@ -2375,6 +2477,8 @@ _G.VoidYBAFarm.cleanup = function()
     if farmCoroutine then pcall(function() task.cancel(farmCoroutine) end) end
     if autoSellLoopThread then pcall(function() task.cancel(autoSellLoopThread) end) end
     if autoStealThread then pcall(function() task.cancel(autoStealThread) end) end
+
+    if autoBuyThread then pcall(function() task.cancel(autoBuyThread) end) end
 
     if cameraNoclipActive then pcall(disableCameraNoclip) end
     if threeDDisabled then pcall(disable3DOff) end
